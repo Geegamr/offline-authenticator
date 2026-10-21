@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "screen-capture",
+  "description": "Minimal permissions for the transient QR selection window",
+  "windows": [
+    "screen-capture"
+  ],
+  "permissions": [
+    "core:event:default",
+    "core:window:allow-destroy"
+  ]
+}

@@ -28,7 +28,7 @@ fn webview2_installed() -> bool {
                 &mut byte_len,
             )
         };
-        if query != 0 || value_type != REG_SZ || byte_len < 4 || byte_len > 512 {
+        if query != 0 || value_type != REG_SZ || !(4..=512).contains(&byte_len) {
             unsafe { RegCloseKey(key) };
             return None;
         }

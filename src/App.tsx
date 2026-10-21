@@ -8,7 +8,7 @@ import {
   addRecoverySet, addTotp, applyRestoreConflicts, changeMasterPassword, chooseBackupPath, chooseImportFile, chooseQrImage,
   chooseVaultFolder, copySecret, defaultVaultPath, deleteRecoverySet, deleteTotp,
   exportVault, getRecoverySet, getTotpCodes, importQrImage, lockVault, parseImport, parseImportFile, reorderRecoverySets, reorderTotp, restoreVault,
-  resolveVaultPath, screenScan, setRecoveryCodeUsed, setupVault, touchVaultActivity, updatePreferences, updateRecoverySet, updateTotp, unlockVault,
+  resolveVaultPath, setRecoveryCodeUsed, setupVault, touchVaultActivity, updatePreferences, updateRecoverySet, updateTotp, unlockVault,
   vaultExists, type Algorithm, type ImportCandidate, type Preferences, type RecoverySet, type RecoverySetSummary,
   type RestoreChoice, type Tab, type TotpDisplay, type TotpRecord, type VaultSummary,
 } from "./authenticator";
@@ -197,9 +197,8 @@ export default function App() {
       catch (error) { fail(error); }
     } else if (mode === "screen") {
       try {
-        const selection = await chooseScreenRegion();
-        if (!selection) { setImportMode("screen"); return; }
-        const parsed = await screenScan(selection);
+        const parsed = await chooseScreenRegion();
+        if (!parsed) { setImportMode("screen"); return; }
         setPendingImport([parsed]); setImportMode("manual"); setAddDialog(true);
       } catch (error) { fail(error); setImportMode("screen"); }
     }
@@ -232,18 +231,32 @@ export default function App() {
     } catch (error) { fail(error); }
   }
 
-  async function chooseScreenRegion(): Promise<{ x: number; y: number; width: number; height: number } | null> {
+  async function chooseScreenRegion(): Promise<ImportCandidate | null> {
     if (!isTauri()) throw new Error("Screen selection requires the Windows desktop app.");
-    const monitor = await invoke<{ x: number; y: number; width: number; height: number }>("get_primary_monitor_bounds");
-    const width = Math.max(40, Math.min(500, Math.floor(monitor.width * 0.65)));
-    const height = Math.max(40, Math.min(500, Math.floor(monitor.height * 0.65)));
-    const left = Math.max(0, Math.floor((monitor.width - width) / 2));
-    const top = Math.max(0, Math.floor((monitor.height - height) / 2));
-    const input = window.prompt(`Enter screen region coordinates on the primary display (pixels). Example: ${left},${top},${width},${height}`, `${left},${top},${width},${height}`);
-    if (!input) return null;
-    const values = input.split(",").map((value) => Number(value.trim()));
-    if (values.length !== 4 || values.some((value) => !Number.isSafeInteger(value))) throw new Error("Enter four integer coordinates separated by commas.");
-    return { x: values[0]!, y: values[1]!, width: values[2]!, height: values[3]! };
+    return new Promise<ImportCandidate | null>((resolve, reject) => {
+      let regionUnlisten: (() => void) | undefined;
+      let cancelUnlisten: (() => void) | undefined;
+      let settled = false;
+      const finish = (result: ImportCandidate | null, error?: unknown) => {
+        if (settled) return;
+        settled = true;
+        regionUnlisten?.();
+        cancelUnlisten?.();
+        if (error) reject(error); else resolve(result);
+      };
+      void (async () => {
+        try {
+          cancelUnlisten = await listen("screen-capture-cancelled", () => finish(null));
+          regionUnlisten = await listen<{ x: number; y: number; width: number; height: number }>("screen-capture-region", async (event) => {
+            try {
+              const candidate = await invoke<ImportCandidate>("capture_screen_region", { request: event.payload });
+              finish(candidate);
+            } catch (error) { finish(null, error); }
+          });
+          await invoke("begin_screen_capture");
+        } catch (error) { finish(null, error); }
+      })();
+    });
   }
 
   async function importUri(input: string) {

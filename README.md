@@ -28,7 +28,7 @@ npm run verify
 npm run tauri -- build
 ```
 
-The installer builds are unsigned, so Windows may show a SmartScreen warning. The installer includes the WebView2 offline installer. A portable folder can be made from the executable and its required runtime files; place it in a writable folder. The portable build needs WebView2 installed on the computer.
+The installer builds are unsigned, so Windows may show a SmartScreen warning. Both the installer and portable executable require the Microsoft Edge WebView2 Runtime. The installer stops with instructions if it is missing; the portable app offers to open Microsoft’s download page before exiting. Place a portable copy in a writable folder.
 
 ## Vault and backups
 

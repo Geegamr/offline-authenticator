@@ -1,4 +1,4 @@
-use crate::{parse_google_migration, parse_otpauth, ImportCandidate, Monitor, MonitorBounds};
+use crate::{ImportCandidate, Monitor, MonitorBounds, parse_google_migration, parse_otpauth};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
 #[derive(Debug, serde::Deserialize)]
@@ -36,7 +36,10 @@ pub fn begin_screen_capture(app: AppHandle) -> Result<(), String> {
         .resizable(false)
         .shadow(false)
         .position(f64::from(bounds.x) / scale, f64::from(bounds.y) / scale)
-        .inner_size(f64::from(bounds.width) / scale, f64::from(bounds.height) / scale)
+        .inner_size(
+            f64::from(bounds.width) / scale,
+            f64::from(bounds.height) / scale,
+        )
         .build()
         .map_err(|error| format!("Cannot open the screen selection frame: {error}"))?;
         Ok(())
@@ -58,6 +61,12 @@ pub fn capture_screen_region(
         let selection_window = app
             .get_webview_window("screen-capture")
             .ok_or("The screen selection frame is unavailable")?;
+        let bounds = crate::get_primary_monitor_bounds()?;
+        let monitor_scale = f64::from(bounds.scale_factor.max(1.0));
+        let frame_position = tauri::PhysicalPosition::new(
+            (f64::from(bounds.x) / monitor_scale).round() as i32,
+            (f64::from(bounds.y) / monitor_scale).round() as i32,
+        );
         selection_window
             .hide()
             .map_err(|error| format!("Cannot hide the selection frame: {error}"))?;
@@ -79,10 +88,11 @@ pub fn capture_screen_region(
             let scale = monitor
                 .scale_factor()
                 .map_err(|error| format!("Cannot inspect display scaling: {error}"))?;
-            let physical_x = request.x as f64 * f64::from(scale);
-            let physical_y = request.y as f64 * f64::from(scale);
-            let physical_width = (request.width as f64 * f64::from(scale)).ceil();
-            let physical_height = (request.height as f64 * f64::from(scale)).ceil();
+            let scale = f64::from(scale);
+            let physical_x = f64::from(frame_position.x) + f64::from(request.x) * scale;
+            let physical_y = f64::from(frame_position.y) + f64::from(request.y) * scale;
+            let physical_width = (request.width as f64 * scale).ceil();
+            let physical_height = (request.height as f64 * scale).ceil();
             let monitor_width = monitor
                 .width()
                 .map_err(|error| format!("Cannot inspect display: {error}"))?;
@@ -95,15 +105,49 @@ pub fn capture_screen_region(
                 || request.height < 40
                 || physical_width > 8000.0
                 || physical_height > 8000.0
-                || physical_x + physical_width > f64::from(monitor_width)
-                || physical_y + physical_height > f64::from(monitor_height)
+                || physical_x
+                    < f64::from(
+                        monitor
+                            .x()
+                            .map_err(|error| format!("Cannot locate display: {error}"))?,
+                    )
+                || physical_y
+                    < f64::from(
+                        monitor
+                            .y()
+                            .map_err(|error| format!("Cannot locate display: {error}"))?,
+                    )
+                || physical_x + physical_width
+                    > f64::from(
+                        monitor
+                            .x()
+                            .map_err(|error| format!("Cannot locate display: {error}"))?,
+                    ) + f64::from(monitor_width)
+                || physical_y + physical_height
+                    > f64::from(
+                        monitor
+                            .y()
+                            .map_err(|error| format!("Cannot locate display: {error}"))?,
+                    ) + f64::from(monitor_height)
             {
                 return Err("Select a screen area at least 40 pixels wide and high, within the primary display.".into());
             }
             let image = monitor
                 .capture_region(
-                    physical_x.floor() as u32,
-                    physical_y.floor() as u32,
+                    (physical_x
+                        - f64::from(
+                            monitor
+                                .x()
+                                .map_err(|error| format!("Cannot locate display: {error}"))?,
+                        ))
+                    .floor() as u32,
+                    (physical_y
+                        - f64::from(
+                            monitor
+                                .y()
+                                .map_err(|error| format!("Cannot locate display: {error}"))?,
+                        ))
+                    .floor() as u32,
                     physical_width as u32,
                     physical_height as u32,
                 )
@@ -116,7 +160,9 @@ pub fn capture_screen_region(
                         return parse_google_migration(&content)?
                             .into_iter()
                             .next()
-                            .ok_or_else(|| "The Google transfer QR did not contain an account.".into());
+                            .ok_or_else(|| {
+                                "The Google transfer QR did not contain an account.".into()
+                            });
                     }
                     if content.starts_with("otpauth://") {
                         return parse_otpauth(&content);
@@ -134,21 +180,34 @@ pub fn capture_screen_region(
 
 #[tauri::command(rename = "get_primary_monitor_bounds")]
 pub fn get_primary_monitor_bounds() -> Result<MonitorBounds, String> {
-    let monitors = Monitor::all()
-        .map_err(|error| format!("Cannot list the display information: {error}"))?;
+    let monitors =
+        Monitor::all().map_err(|error| format!("Cannot list the display information: {error}"))?;
     let mut candidates = Vec::new();
     for monitor in monitors {
         let bounds = MonitorBounds {
-            x: monitor.x().map_err(|error| format!("Cannot locate display: {error}"))?,
-            y: monitor.y().map_err(|error| format!("Cannot locate display: {error}"))?,
-            width: monitor.width().map_err(|error| format!("Cannot inspect display: {error}"))?,
-            height: monitor.height().map_err(|error| format!("Cannot inspect display: {error}"))?,
-            scale_factor: monitor.scale_factor().map_err(|error| format!("Cannot inspect display scaling: {error}"))?,
+            x: monitor
+                .x()
+                .map_err(|error| format!("Cannot locate display: {error}"))?,
+            y: monitor
+                .y()
+                .map_err(|error| format!("Cannot locate display: {error}"))?,
+            width: monitor
+                .width()
+                .map_err(|error| format!("Cannot inspect display: {error}"))?,
+            height: monitor
+                .height()
+                .map_err(|error| format!("Cannot inspect display: {error}"))?,
+            scale_factor: monitor
+                .scale_factor()
+                .map_err(|error| format!("Cannot inspect display scaling: {error}"))?,
         };
         if monitor.is_primary().unwrap_or(false) {
             return Ok(bounds);
         }
         candidates.push(bounds);
     }
-    candidates.into_iter().next().ok_or_else(|| "No display is available for screen scanning.".to_string())
+    candidates
+        .into_iter()
+        .next()
+        .ok_or_else(|| "No display is available for screen scanning.".to_string())
 }

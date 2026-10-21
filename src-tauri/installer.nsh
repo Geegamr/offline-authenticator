@@ -4,7 +4,7 @@
     ReadRegStr $0 HKCU "Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" "pv"
   ${EndIf}
   ${If} $0 == ""
-    MessageBox MB_ICONSTOP "The Microsoft Edge WebView2 Runtime is not installed. Install the Evergreen Runtime before installing Offline Authenticator."
+    MessageBox MB_ICONSTOP "The Microsoft Edge WebView2 Runtime is not installed. Download and install the Evergreen Runtime, then rerun Offline Authenticator setup."
     Abort
   ${EndIf}
 !macroend
