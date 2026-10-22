@@ -7,7 +7,7 @@ type Region = { x: number; y: number; width: number; height: number };
 const root = document.querySelector<HTMLDivElement>("#screen-capture-root")!;
 root.innerHTML = `
   <main class="selection-shell" aria-label="Screen QR selection">
-    <div class="selection-instructions" role="status">Drag to select the QR code. Use arrow keys to move; Shift + arrows to resize. Enter scans, Escape cancels.</div>
+    <div class="selection-instructions" role="status"><span>Drag to select the QR code. Use arrows to move; Shift + arrows to resize.</span><button class="selection-cancel" type="button">Cancel scan</button></div>
     <div class="selection-box" role="application" tabindex="0" aria-label="QR selection frame">
       <span class="selection-corner corner-tl"></span><span class="selection-corner corner-tr"></span>
       <span class="selection-corner corner-bl"></span><span class="selection-corner corner-br"></span>
@@ -18,6 +18,7 @@ root.innerHTML = `
 const box = root.querySelector<HTMLDivElement>(".selection-box")!;
 const shell = root.querySelector<HTMLElement>(".selection-shell")!;
 const scan = root.querySelector<HTMLButtonElement>(".selection-scan")!;
+const cancel = root.querySelector<HTMLButtonElement>(".selection-cancel")!;
 let drawing: { start: Point; initial: Region; mode: "draw" | "move" } | null = null;
 let bounds: Region = { x: Math.round(window.innerWidth * 0.3), y: Math.round(window.innerHeight * 0.3), width: Math.round(window.innerWidth * 0.4), height: Math.round(window.innerHeight * 0.4) };
 
@@ -69,6 +70,7 @@ shell.addEventListener("pointermove", (event) => {
 });
 shell.addEventListener("pointerup", () => { drawing = null; });
 scan.addEventListener("click", () => void submit());
+cancel.addEventListener("click", () => void cancelSelection());
 box.addEventListener("keydown", (event) => {
   if (event.key === "Enter") { event.preventDefault(); void submit(); return; }
   if (event.key === "Escape") { event.preventDefault(); void cancelSelection(); return; }
@@ -91,8 +93,9 @@ box.addEventListener("keydown", (event) => {
 });
 
 async function cancelSelection() {
-  await getCurrentWindow().emit("screen-capture-cancelled");
-  await getCurrentWindow().destroy();
+  const window = getCurrentWindow();
+  try { await window.emit("screen-capture-cancelled"); }
+  finally { await window.destroy(); }
 }
 
 void getCurrentWindow().onCloseRequested((event) => {

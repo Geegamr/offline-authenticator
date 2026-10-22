@@ -2219,7 +2219,9 @@ pub struct MonitorBounds {
     pub scale_factor: f32,
 }
 #[cfg(windows)]
-use screen_capture::{begin_screen_capture, capture_screen_region, get_primary_monitor_bounds};
+use screen_capture::{
+    begin_screen_capture, cancel_screen_capture, capture_screen_region, get_primary_monitor_bounds,
+};
 #[cfg(windows)]
 use xcap::Monitor;
 
@@ -2240,6 +2242,14 @@ pub fn run() {
                 tauri::WindowEvent::Focused(false) => {
                     if let Ok(mut lost_at) = window.state::<AppState>().focus_lost_at.lock() {
                         *lost_at = Some(std::time::Instant::now());
+                    }
+                    #[cfg(windows)]
+                    if window
+                        .app_handle()
+                        .get_webview_window("screen-capture")
+                        .is_some()
+                    {
+                        return;
                     }
                     let _ = window.emit("app-focus-lost", ());
                 }
@@ -2283,6 +2293,7 @@ pub fn run() {
         parse_import_file,
         import_qr_image,
         begin_screen_capture,
+        cancel_screen_capture,
         capture_screen_region,
         get_primary_monitor_bounds
     ]);

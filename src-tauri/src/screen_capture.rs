@@ -1,6 +1,26 @@
 use crate::{ImportCandidate, Monitor, MonitorBounds, parse_google_migration, parse_otpauth};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
+fn close_selection_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("screen-capture") {
+        let _ = window.destroy();
+    }
+}
+
+fn restore_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+#[tauri::command(rename = "cancel_screen_capture")]
+pub fn cancel_screen_capture(app: AppHandle) -> Result<(), String> {
+    close_selection_window(&app);
+    restore_main_window(&app);
+    Ok(())
+}
+
 #[derive(Debug, serde::Deserialize)]
 pub struct ScreenSelectionRequest {
     pub x: i32,
@@ -35,11 +55,19 @@ pub fn begin_screen_capture(app: AppHandle) -> Result<(), String> {
         .skip_taskbar(true)
         .resizable(false)
         .shadow(false)
+        .focused(true)
         .position(f64::from(bounds.x) / scale, f64::from(bounds.y) / scale)
         .inner_size(
             f64::from(bounds.width) / scale,
             f64::from(bounds.height) / scale,
         )
+        .visible(false)
+        .on_page_load(|window, payload| {
+            if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        })
         .build()
         .map_err(|error| format!("Cannot open the screen selection frame: {error}"))?;
         Ok(())
@@ -47,7 +75,7 @@ pub fn begin_screen_capture(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command(rename = "capture_screen_region")]
-pub fn capture_screen_region(
+pub async fn capture_screen_region(
     app: AppHandle,
     request: ScreenSelectionRequest,
 ) -> Result<ImportCandidate, String> {
@@ -67,18 +95,21 @@ pub fn capture_screen_region(
             (f64::from(bounds.x) / monitor_scale).round() as i32,
             (f64::from(bounds.y) / monitor_scale).round() as i32,
         );
-        selection_window
-            .hide()
-            .map_err(|error| format!("Cannot hide the selection frame: {error}"))?;
         let main_window = app
             .get_webview_window("main")
             .ok_or("The main app window is unavailable")?;
-        main_window
+        selection_window
             .hide()
-            .map_err(|error| format!("Cannot hide the app before screen capture: {error}"))?;
-        std::thread::sleep(std::time::Duration::from_millis(250));
-
-        let capture_result = (|| {
+            .map_err(|error| format!("Cannot hide the selection frame: {error}"))?;
+        if let Err(error) = main_window.hide() {
+            let _ = selection_window.show();
+            return Err(format!(
+                "Cannot hide the app before screen capture: {error}"
+            ));
+        }
+        let capture_result = tauri::async_runtime::spawn_blocking(move || {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            (|| {
             let monitors = Monitor::all()
                 .map_err(|error| format!("Cannot list displays for screen capture: {error}"))?;
             let monitor = monitors
@@ -170,10 +201,13 @@ pub fn capture_screen_region(
                 }
             }
             Err("No supported TOTP QR code was found in that screen area.".into())
-        })();
+            })()
+        })
+        .await
+        .unwrap_or_else(|error| Err(format!("Screen capture worker failed: {error}")));
 
-        let _ = main_window.show();
-        let _ = selection_window.close();
+        close_selection_window(&app);
+        restore_main_window(&app);
         capture_result
     }
 }

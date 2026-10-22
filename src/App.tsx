@@ -72,10 +72,59 @@ export default function App() {
   const [reloadKey, setReloadKey] = useState(0);
   const [copyAskAfter, setCopyAskAfter] = useState<string | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
+  const screenCaptureActiveRef = useRef(false);
+
+  async function chooseScreenRegion(): Promise<ImportCandidate | null> {
+    if (!isTauri()) throw new Error("Screen selection requires the Windows desktop app.");
+    screenCaptureActiveRef.current = true;
+    return new Promise<ImportCandidate | null>((resolve, reject) => {
+      let regionUnlisten: (() => void) | undefined;
+      let cancelUnlisten: (() => void) | undefined;
+      let timeout = 0;
+      let settled = false;
+      const finish = (result: ImportCandidate | null, error?: unknown) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timeout);
+        screenCaptureActiveRef.current = false;
+        regionUnlisten?.();
+        cancelUnlisten?.();
+        if (error) reject(error); else resolve(result);
+      };
+      void (async () => {
+        try {
+          cancelUnlisten = await listen("screen-capture-cancelled", () => {
+            void invoke("cancel_screen_capture").catch(() => undefined);
+            finish(null);
+          });
+          regionUnlisten = await listen<{ x: number; y: number; width: number; height: number }>("screen-capture-region", async (event) => {
+            try {
+              const candidate = await invoke<ImportCandidate>("capture_screen_region", { request: event.payload });
+              finish(candidate);
+            } catch (error) {
+              await invoke("cancel_screen_capture").catch(() => undefined);
+              finish(null, error);
+            }
+          });
+          timeout = window.setTimeout(() => {
+            void invoke("cancel_screen_capture").catch(() => undefined);
+            finish(null, new Error("Screen scanning timed out and was cancelled. Try again."));
+          }, 120_000);
+          await invoke("begin_screen_capture");
+        } catch (error) {
+          void invoke("cancel_screen_capture").catch(() => undefined);
+          finish(null, error);
+        }
+      })();
+    });
+  }
+
+  const [pendingImport, setPendingImport] = useState<ImportCandidate[]>([]);
 
   const notify = useCallback((message: string, tone: Toast["tone"] = "success") => { setToast({ message, tone }); window.setTimeout(() => setToast(null), 3200); }, []);
   const fail = useCallback((error: unknown) => notify(prettifyError(error), "error"), [notify]);
   const refresh = useCallback(() => setReloadKey((value) => value + 1), []);
+
   const setupPath = useCallback(async () => {
     try {
       const nextPath = await defaultVaultPath(portable);
@@ -120,10 +169,10 @@ export default function App() {
       focusTimer = window.setTimeout(lockForInactivity, 300_000);
     }).then((fn) => { unlisten = fn; });
     void listen("app-focus-gained", () => window.clearTimeout(focusTimer)).then((fn) => { gainedUnlisten = fn; });
-    const checkSleep = () => { if (Date.now() - lastTick > 60_000) lockForInactivity(); lastTick = Date.now(); };
+    const checkSleep = () => { if (!screenCaptureActiveRef.current && Date.now() - lastTick > 60_000) lockForInactivity(); lastTick = Date.now(); };
     let lastTick = Date.now();
     const sleepTimer = window.setInterval(checkSleep, 15_000);
-    const visibility = () => { if (document.hidden) lockForInactivity(); };
+    const visibility = () => { if (document.hidden && !screenCaptureActiveRef.current) lockForInactivity(); };
     document.addEventListener("visibilitychange", visibility);
     let lastActivity = Date.now();
     let lastActivitySent = 0;
@@ -136,7 +185,7 @@ export default function App() {
     };
     const activityEvents: Array<keyof WindowEventMap> = ["pointerdown", "keydown", "mousemove", "wheel", "touchstart"];
     activityEvents.forEach((event) => window.addEventListener(event, recordActivity, { passive: true }));
-    const idleLock = window.setInterval(() => { if (Date.now() - lastActivity >= 300_000) lockForInactivity(); }, 5_000);
+    const idleLock = window.setInterval(() => { if (!screenCaptureActiveRef.current && Date.now() - lastActivity >= 300_000) lockForInactivity(); }, 5_000);
     const closeHandler = (event: BeforeUnloadEvent) => { event.preventDefault(); void lockVault(); };
     window.addEventListener("beforeunload", closeHandler);
     void register("CommandOrControl+Shift+L", () => { setSummary(null); setOnboardStage("unlock"); setPassword(""); void lockVault(); });
@@ -204,7 +253,6 @@ export default function App() {
     }
   }
 
-  const [pendingImport, setPendingImport] = useState<ImportCandidate[]>([]);
   const [addDialog, setAddDialog] = useState(false);
   const [editTarget, setEditTarget] = useState<TotpRecord | null>(null);
   const [selectedRecoveryToEdit, setSelectedRecoveryToEdit] = useState<RecoverySet | null>(null);
@@ -229,34 +277,6 @@ export default function App() {
       const parsed = await parseImportFile(selected, sourcePassword);
       setPendingImport(parsed); setImportMode("bulk"); setAddDialog(true);
     } catch (error) { fail(error); }
-  }
-
-  async function chooseScreenRegion(): Promise<ImportCandidate | null> {
-    if (!isTauri()) throw new Error("Screen selection requires the Windows desktop app.");
-    return new Promise<ImportCandidate | null>((resolve, reject) => {
-      let regionUnlisten: (() => void) | undefined;
-      let cancelUnlisten: (() => void) | undefined;
-      let settled = false;
-      const finish = (result: ImportCandidate | null, error?: unknown) => {
-        if (settled) return;
-        settled = true;
-        regionUnlisten?.();
-        cancelUnlisten?.();
-        if (error) reject(error); else resolve(result);
-      };
-      void (async () => {
-        try {
-          cancelUnlisten = await listen("screen-capture-cancelled", () => finish(null));
-          regionUnlisten = await listen<{ x: number; y: number; width: number; height: number }>("screen-capture-region", async (event) => {
-            try {
-              const candidate = await invoke<ImportCandidate>("capture_screen_region", { request: event.payload });
-              finish(candidate);
-            } catch (error) { finish(null, error); }
-          });
-          await invoke("begin_screen_capture");
-        } catch (error) { finish(null, error); }
-      })();
-    });
   }
 
   async function importUri(input: string) {
