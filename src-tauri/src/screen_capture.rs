@@ -1,12 +1,6 @@
 use crate::{ImportCandidate, Monitor, MonitorBounds, parse_google_migration, parse_otpauth};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
-fn close_selection_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("screen-capture") {
-        let _ = window.destroy();
-    }
-}
-
 fn restore_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -14,10 +8,16 @@ fn restore_main_window(app: &AppHandle) {
     }
 }
 
+fn close_capture_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("screen-capture") {
+        let _ = window.destroy();
+    }
+    restore_main_window(app);
+}
+
 #[tauri::command(rename = "cancel_screen_capture")]
 pub fn cancel_screen_capture(app: AppHandle) -> Result<(), String> {
-    close_selection_window(&app);
-    restore_main_window(&app);
+    close_capture_window(&app);
     Ok(())
 }
 
@@ -41,7 +41,19 @@ pub fn begin_screen_capture(app: AppHandle) -> Result<(), String> {
         if app.get_webview_window("screen-capture").is_some() {
             return Err("A screen scan is already open.".into());
         }
-        let bounds = crate::get_primary_monitor_bounds()?;
+        let main_window = app
+            .get_webview_window("main")
+            .ok_or("The main app window is unavailable")?;
+        main_window.hide().map_err(|error| {
+            format!("Cannot hide the app before opening screen selection: {error}")
+        })?;
+        let bounds = match crate::get_primary_monitor_bounds() {
+            Ok(bounds) => bounds,
+            Err(error) => {
+                restore_main_window(&app);
+                return Err(error);
+            }
+        };
         let scale = f64::from(bounds.scale_factor.max(1.0));
         WebviewWindowBuilder::new(
             &app,
@@ -49,6 +61,7 @@ pub fn begin_screen_capture(app: AppHandle) -> Result<(), String> {
             WebviewUrl::App("screen-capture.html".into()),
         )
         .title("Select the authenticator QR code")
+        .accept_first_mouse(true)
         .decorations(false)
         .transparent(true)
         .always_on_top(true)
@@ -61,7 +74,6 @@ pub fn begin_screen_capture(app: AppHandle) -> Result<(), String> {
             f64::from(bounds.width) / scale,
             f64::from(bounds.height) / scale,
         )
-        .visible(false)
         .on_page_load(|window, payload| {
             if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
                 let _ = window.show();
@@ -69,7 +81,10 @@ pub fn begin_screen_capture(app: AppHandle) -> Result<(), String> {
             }
         })
         .build()
-        .map_err(|error| format!("Cannot open the screen selection frame: {error}"))?;
+        .map_err(|error| {
+            restore_main_window(&app);
+            format!("Cannot open the screen selection frame: {error}")
+        })?;
         Ok(())
     }
 }
@@ -86,23 +101,38 @@ pub async fn capture_screen_region(
     }
     #[cfg(windows)]
     {
-        let selection_window = app
-            .get_webview_window("screen-capture")
-            .ok_or("The screen selection frame is unavailable")?;
-        let bounds = crate::get_primary_monitor_bounds()?;
+        let selection_window = match app.get_webview_window("screen-capture") {
+            Some(window) => window,
+            None => {
+                close_capture_window(&app);
+                return Err("The screen selection frame is unavailable".into());
+            }
+        };
+        let bounds = match crate::get_primary_monitor_bounds() {
+            Ok(bounds) => bounds,
+            Err(error) => {
+                close_capture_window(&app);
+                return Err(error);
+            }
+        };
         let monitor_scale = f64::from(bounds.scale_factor.max(1.0));
         let frame_position = tauri::PhysicalPosition::new(
             (f64::from(bounds.x) / monitor_scale).round() as i32,
             (f64::from(bounds.y) / monitor_scale).round() as i32,
         );
-        let main_window = app
-            .get_webview_window("main")
-            .ok_or("The main app window is unavailable")?;
-        selection_window
-            .hide()
-            .map_err(|error| format!("Cannot hide the selection frame: {error}"))?;
+        let main_window = match app.get_webview_window("main") {
+            Some(window) => window,
+            None => {
+                close_capture_window(&app);
+                return Err("The main app window is unavailable".into());
+            }
+        };
+        if let Err(error) = selection_window.hide() {
+            close_capture_window(&app);
+            return Err(format!("Cannot hide the selection frame: {error}"));
+        }
         if let Err(error) = main_window.hide() {
-            let _ = selection_window.show();
+            close_capture_window(&app);
             return Err(format!(
                 "Cannot hide the app before screen capture: {error}"
             ));
@@ -206,8 +236,7 @@ pub async fn capture_screen_region(
         .await
         .unwrap_or_else(|error| Err(format!("Screen capture worker failed: {error}")));
 
-        close_selection_window(&app);
-        restore_main_window(&app);
+        close_capture_window(&app);
         capture_result
     }
 }

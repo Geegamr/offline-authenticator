@@ -1081,11 +1081,40 @@ fn get_default_vault_path(app: tauri::AppHandle, portable: bool) -> Result<Strin
         }
         return Ok(folder.join("vault.authvault").display().to_string());
     }
-    let folder = app
+    let default_path = app
         .path()
         .app_data_dir()
-        .map_err(|error| format!("Cannot locate the app data folder: {error}"))?;
-    Ok(folder.join("vault.authvault").display().to_string())
+        .map_err(|error| format!("Cannot locate the app data folder: {error}"))?
+        .join("vault.authvault");
+    let remembered_path = app
+        .path()
+        .app_config_dir()
+        .map_err(|error| format!("Cannot locate the app config folder: {error}"))?
+        .join("vault-path");
+    match fs::read_to_string(&remembered_path) {
+        Ok(path) => {
+            let path = path.trim();
+            if !path.is_empty() && Path::new(path).is_file() {
+                return Ok(path.to_owned());
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("Cannot read the saved vault location: {error}")),
+    }
+    Ok(default_path.display().to_string())
+}
+
+#[tauri::command(rename = "remember_vault_path")]
+fn remember_vault_path(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    if !Path::new(&path).is_file() {
+        return Err("The vault file does not exist at the selected location.".into());
+    }
+    let remembered_path = app
+        .path()
+        .app_config_dir()
+        .map_err(|error| format!("Cannot locate the app config folder: {error}"))?
+        .join("vault-path");
+    atomic_write_replace(&remembered_path, path.as_bytes(), "vault location")
 }
 
 #[tauri::command(rename = "add_recovery_set")]
@@ -2239,6 +2268,14 @@ pub fn run() {
                 return;
             }
             match event {
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    api.prevent_close();
+                    let app_window = window.clone();
+                    let state = window.state::<AppState>();
+                    let _ = lock_vault(state);
+                    let _ = app_window.destroy();
+                }
+
                 tauri::WindowEvent::Focused(false) => {
                     if let Ok(mut lost_at) = window.state::<AppState>().focus_lost_at.lock() {
                         *lost_at = Some(std::time::Instant::now());
@@ -2265,6 +2302,7 @@ pub fn run() {
     #[cfg(windows)]
     let builder = builder.invoke_handler(tauri::generate_handler![
         get_default_vault_path,
+        remember_vault_path,
         vault_exists,
         resolve_vault_path,
         setup_vault,
@@ -2300,6 +2338,7 @@ pub fn run() {
     #[cfg(not(windows))]
     let builder = builder.invoke_handler(tauri::generate_handler![
         get_default_vault_path,
+        remember_vault_path,
         vault_exists,
         resolve_vault_path,
         setup_vault,
