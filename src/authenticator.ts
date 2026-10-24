@@ -48,6 +48,7 @@ export type TotpDisplay = {
   subtitle: string;
   code: string;
   remaining_seconds: number;
+  period: number;
   has_recovery_set: boolean;
 };
 export type ImportCandidate = {
@@ -82,7 +83,7 @@ function demoCode(record: TotpRecord, now = Date.now()) {
   const totp = new TOTP({ issuer: record.name, label: record.subtitle, algorithm: record.algorithm.toUpperCase() as "SHA1" | "SHA256" | "SHA512", digits: record.digits, period: record.period, secret: record.secret });
   const code = totp.generate({ timestamp: now });
   const remaining = record.period - Math.floor((now / 1000) % record.period);
-  return { id: record.id, name: record.name, subtitle: record.subtitle, code: code.replace(/\B(?=(\d{3})+(?!\d))/g, " "), remaining_seconds: remaining, has_recovery_set: !!record.recovery_set_id };
+  return { id: record.id, name: record.name, subtitle: record.subtitle, code, remaining_seconds: remaining, period: record.period, has_recovery_set: !!record.recovery_set_id };
 }
 
 export async function defaultVaultPath(portable: boolean): Promise<string> {
@@ -120,6 +121,10 @@ export async function getTotpCodes(): Promise<TotpDisplay[]> {
   if (isTauri()) return invoke<TotpDisplay[]>("get_totp_codes");
   return requireDemo().totp_entries.map((record) => demoCode(record));
 }
+export async function getVaultSummary(): Promise<VaultSummary> {
+  if (isTauri()) return invoke<VaultSummary>("get_vault_summary");
+  return copySummary(requireDemo());
+}
 export async function getRecoverySet(setId: string): Promise<RecoverySet> {
   if (isTauri()) return invoke<RecoverySet>("get_recovery_set", { setId });
   const cached = demoRecoverySets[setId];
@@ -128,6 +133,13 @@ export async function getRecoverySet(setId: string): Promise<RecoverySet> {
   const set: RecoverySet = { id: setId, name: "Amazon Web Services", subtitle: "Root account", added_at: 1_728_000_003, codes: sampleCodes.map((value, index) => ({ id: `demo-code-${index}`, value, used: index === 3, added_at: 1_728_000_003 + index })) };
   demoRecoverySets[setId] = structuredClone(set);
   return set;
+}
+export async function addTotpBatch(inputs: ImportCandidate[]) {
+  if (isTauri()) return invoke("add_totp_batch", { inputs });
+  const summary = requireDemo();
+  if (summary.totp_entries.length + inputs.length > 10_000) throw new Error("This vault already contains too many authenticators.");
+  const records = inputs.map((input) => ({ ...input, id: id(), added_at: Date.now() / 1000 }));
+  summary.totp_entries.push(...records);
 }
 export async function addTotp(input: Omit<ImportCandidate, "secret"> & { secret: string; recovery_set_id?: string | null }): Promise<TotpRecord> {
   if (isTauri()) return invoke<TotpRecord>("add_totp", { input });
@@ -161,6 +173,7 @@ export async function deleteRecoverySet(setId: string) { if (isTauri()) return i
 export async function reorderRecoverySets(ids: string[]) { if (isTauri()) return invoke("reorder_recovery_sets", { ids }); requireDemo().preferences.recovery_order = ids; }
 export async function updatePreferences(preferences: Preferences) { if (isTauri()) return invoke("update_preferences", { preferences }); requireDemo().preferences = preferences; }
 export async function changeMasterPassword(currentPassword: string, newPassword: string) { if (isTauri()) return invoke("change_master_password", { currentPassword, newPassword }); if (currentPassword !== "demo-password") throw new Error("The demo password is demo-password."); }
+export async function deleteVault(password: string) { if (isTauri()) return invoke("delete_vault", { password }); throw new Error("Deleting a vault is only available in the Windows desktop app."); }
 export async function copySecret(value: string, clearAfterThirtySeconds: boolean) {
   if (isTauri()) {
     await Clipboard.writeText(value);

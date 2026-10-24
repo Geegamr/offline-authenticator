@@ -1,4 +1,5 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { once } from "@tauri-apps/api/event";
 import "./screen-capture.css";
 
 type Point = { x: number; y: number };
@@ -47,7 +48,11 @@ async function submit() {
     width: Math.round(bounds.width),
     height: Math.round(bounds.height),
   };
-  await getCurrentWindow().emit("screen-capture-region", request);
+  try {
+    await getCurrentWindow().emit("screen-capture-region", request);
+  } catch (error) {
+    await getCurrentWindow().emit("screen-capture-error", error instanceof Error ? error.message : "Could not start screen capture.");
+  }
 }
 
 shell.addEventListener("pointerdown", (event) => {
@@ -95,8 +100,15 @@ box.addEventListener("keydown", (event) => {
 async function cancelSelection() {
   const window = getCurrentWindow();
   try { await window.emit("screen-capture-cancelled"); }
-  finally { await window.destroy(); }
+  finally { await window.destroy().catch(() => undefined); }
 }
+
+void once("screen-capture-ready", () => {
+  requestAnimationFrame(() => {
+    render();
+    box.focus();
+  });
+});
 
 void getCurrentWindow().onCloseRequested((event) => {
   event.preventDefault();

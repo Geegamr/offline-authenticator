@@ -40,9 +40,9 @@
   --red-light: #442526;
   --shadow: 0 18px 50px rgb(0 0 0 / 32%);
 }
-:root[data-appearance="system"] { color-scheme: light dark; }
+:root:not([data-appearance]), :root[data-appearance="system"] { color-scheme: light dark; }
 @media (prefers-color-scheme: dark) {
-  :root[data-appearance="system"] {
+  :root:not([data-appearance]), :root[data-appearance="system"] {
     color: #e9edf3;
     background: #111820;
     --page: #111820; --paper: #1b2530; --ink: #e9edf3; --muted: #9aa9b9;

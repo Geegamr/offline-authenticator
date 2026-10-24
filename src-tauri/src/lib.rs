@@ -33,6 +33,7 @@ const DEFAULT_LANES: u32 = 1;
 const MAX_VAULT_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_IMPORT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_ENTRIES: usize = 10_000;
+const TOTP_CLOCK_OFFSET_SECONDS: u64 = 4;
 const MAX_KDF_MEMORY_KIB: u32 = 262_144;
 const MAX_KDF_ITERATIONS: u32 = 10;
 pub const WEBVIEW2_CLIENT_GUID: &str = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}";
@@ -349,6 +350,14 @@ fn unix_seconds() -> Result<u64, String> {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .map_err(|_| "System clock is before the Unix epoch".into())
+}
+fn adjusted_totp_time(now: u64) -> u64 {
+    now.saturating_sub(TOTP_CLOCK_OFFSET_SECONDS)
+}
+fn totp_remaining_seconds(now: u64, period: u32) -> u32 {
+    let adjusted_now = adjusted_totp_time(now);
+    let period = u64::from(period);
+    (period - adjusted_now % period) as u32
 }
 fn random_id() -> Result<String, String> {
     let mut bytes = [0u8; 16];
@@ -761,12 +770,142 @@ fn vault_exists(path: String) -> Result<bool, String> {
     Ok(PathBuf::from(path).is_file())
 }
 #[tauri::command(rename = "setup_vault")]
-fn setup_vault(path: String, password: String) -> Result<(), String> {
-    validate_password(&password)?;
-    atomic_write_new(
-        Path::new(&path),
-        &encrypt_vault(&initialized_vault(), password.as_bytes())?,
-    )
+async fn setup_vault(path: String, password: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        validate_password(&password)?;
+        atomic_write_new(
+            Path::new(&path),
+            &encrypt_vault(&initialized_vault(), password.as_bytes())?,
+        )
+    })
+    .await
+    .map_err(|error| format!("Vault setup task failed: {error}"))?
+}
+#[tauri::command(rename = "add_totp_batch")]
+async fn add_totp_batch(inputs: Vec<TotpInput>, state: State<'_, AppState>) -> Result<(), String> {
+    if inputs.is_empty() || inputs.len() > MAX_ENTRIES {
+        return Err("The account import is empty or contains too many authenticators.".into());
+    }
+    let mut records = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        validate_totp_fields(&input.name, &input.secret, input.digits, input.period)?;
+        if input.subtitle.chars().count() > 300 {
+            return Err("An imported account label is too long.".into());
+        }
+        let record = TotpRecord {
+            id: random_id()?,
+            name: input.name.trim().to_owned(),
+            subtitle: input.subtitle.trim().to_owned(),
+            secret: input
+                .secret
+                .trim()
+                .replace([' ', '-'], "")
+                .to_ascii_uppercase(),
+            algorithm: input.algorithm,
+            digits: input.digits,
+            period: input.period,
+            added_at: unix_seconds()?,
+            recovery_set_id: input.recovery_set_id,
+        };
+        totp_for_record(&record)?;
+        records.push(record);
+    }
+    let (path, password, original_vault, mut vault) = {
+        let guard = get_session(&state)?;
+        let session = guard.as_ref().ok_or("The vault is locked")?;
+        if session
+            .vault
+            .totp_entries
+            .len()
+            .saturating_add(records.len())
+            > MAX_ENTRIES
+        {
+            return Err("This vault already contains too many authenticators.".into());
+        }
+        (
+            session.path.clone(),
+            session.password.clone(),
+            session.vault.clone(),
+            session.vault.clone(),
+        )
+    };
+    vault.totp_entries.extend(records);
+    let encryption_password = password.clone();
+    let (bytes, vault) = tauri::async_runtime::spawn_blocking(move || {
+        let bytes = encrypt_vault(&vault, encryption_password.as_slice())?;
+        Ok::<_, String>((bytes, vault))
+    })
+    .await
+    .map_err(|error| format!("Authenticator import task failed: {error}"))??;
+    let mut guard = get_session(&state)?;
+    let session = guard.as_mut().ok_or("The vault was locked during import")?;
+    if session.path != path
+        || session.vault != original_vault
+        || !constant_time_eq::constant_time_eq(session.password.as_slice(), password.as_slice())
+    {
+        return Err("The vault changed during import; no accounts were saved.".into());
+    }
+    atomic_write_replace(&path, &bytes, "vault")?;
+    session.vault = vault;
+    Ok(())
+}
+#[tauri::command(rename = "delete_vault")]
+async fn delete_vault(password: String, state: State<'_, AppState>) -> Result<(), String> {
+    let candidate = Zeroizing::new(password.into_bytes());
+    let (path, vault, session_password) = {
+        let guard = get_session(&state)?;
+        let session = guard.as_ref().ok_or("The vault is locked")?;
+        if !constant_time_eq::constant_time_eq(session.password.as_slice(), candidate.as_slice()) {
+            return Err("The master password is incorrect. The vault was not deleted.".into());
+        }
+        (
+            session.path.clone(),
+            session.vault.clone(),
+            session.password.clone(),
+        )
+    };
+    let deletion_path = path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let bytes = Zeroizing::new(
+            fs::read(&deletion_path)
+                .map_err(|error| format!("Could not verify the vault before deletion: {error}"))?,
+        );
+        if bytes.len() as u64 > MAX_VAULT_BYTES {
+            return Err(
+                "The vault file exceeds the supported size limit. It was not deleted.".into(),
+            );
+        }
+        decrypt_vault(&bytes, candidate.as_slice())?;
+        Ok::<_, String>(())
+    })
+    .await
+    .map_err(|error| format!("Vault deletion task failed: {error}"))??;
+    let mut guard = get_session(&state)?;
+    let session = guard
+        .as_mut()
+        .ok_or("The vault was locked during deletion")?;
+    if session.path != path
+        || session.vault != vault
+        || !constant_time_eq::constant_time_eq(
+            session.password.as_slice(),
+            session_password.as_slice(),
+        )
+    {
+        return Err("The vault session changed during deletion. The vault file was not deleted; retry after reopening the app.".into());
+    }
+    fs::remove_file(&path).map_err(|error| format!("Could not delete the vault file: {error}"))?;
+    *guard = None;
+    drop(guard);
+    if let Ok(mut activity) = state.activity.lock() {
+        *activity = None;
+    }
+    if let Ok(mut focus) = state.focus_lost_at.lock() {
+        *focus = None;
+    }
+    if let Ok(mut pending) = state.pending_restore.lock() {
+        *pending = None;
+    }
+    Ok(())
 }
 #[tauri::command(rename = "resolve_vault_path")]
 fn resolve_vault_path(path: String, portable: bool) -> Result<String, String> {
@@ -792,12 +931,15 @@ fn validate_writable_folder(folder: &Path) -> Result<String, String> {
     Ok(folder.join("vault.authvault").display().to_string())
 }
 #[tauri::command(rename = "unlock_vault")]
-fn unlock_vault(
+async fn unlock_vault(
     path: String,
     password: String,
     state: State<'_, AppState>,
 ) -> Result<VaultSummary, String> {
-    let (path, vault, password) = unlock_path(PathBuf::from(path), password)?;
+    let (path, vault, password) =
+        tauri::async_runtime::spawn_blocking(move || unlock_path(PathBuf::from(path), password))
+            .await
+            .map_err(|error| format!("Vault unlock task failed: {error}"))??;
     *state
         .session
         .lock()
@@ -878,8 +1020,8 @@ fn get_totp_codes(state: State<'_, AppState>) -> Result<Vec<TotpDisplay>, String
         .map(|entry| {
             let totp = totp_for_record(entry)?;
             let now = unix_seconds()?;
-            let code = totp.generate(now);
-            let remaining_seconds = (entry.period as u64 - now % entry.period as u64) as u32;
+            let code = totp.generate(adjusted_totp_time(now));
+            let remaining_seconds = totp_remaining_seconds(now, entry.period);
             Ok(TotpDisplay {
                 id: entry.id.clone(),
                 name: entry.name.clone(),
@@ -1267,22 +1409,49 @@ fn update_preferences(
     })
 }
 #[tauri::command(rename = "change_master_password")]
-fn change_master_password(
+async fn change_master_password(
     current_password: String,
     new_password: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     validate_password(&new_password)?;
-    let mut guard = get_session(&state)?;
-    let session = guard.as_mut().ok_or("The vault is locked")?;
     let candidate = Zeroizing::new(current_password.into_bytes());
-    if !constant_time_eq::constant_time_eq(session.password.as_slice(), candidate.as_slice()) {
-        return Err("The current master password is incorrect.".into());
-    }
     let next = Zeroizing::new(new_password.into_bytes());
-    let encrypted = encrypt_vault(&session.vault, &next)?;
-    atomic_write_replace(&session.path, &encrypted, "vault")?;
-    session.password = next;
+    let (path, vault, previous_password) = {
+        let guard = get_session(&state)?;
+        let session = guard.as_ref().ok_or("The vault is locked")?;
+        if !constant_time_eq::constant_time_eq(session.password.as_slice(), candidate.as_slice()) {
+            return Err("The current master password is incorrect.".into());
+        }
+        (
+            session.path.clone(),
+            session.vault.clone(),
+            session.password.clone(),
+        )
+    };
+    let encryption_password = next.clone();
+    let encryption_vault = vault.clone();
+    let encrypted = tauri::async_runtime::spawn_blocking(move || {
+        encrypt_vault(&encryption_vault, encryption_password.as_slice())
+    })
+    .await
+    .map_err(|error| format!("Password change task failed: {error}"))??;
+    let mut guard = get_session(&state)?;
+    let session = guard
+        .as_mut()
+        .ok_or("The vault was locked during the password change")?;
+    if session.path != path
+        || session.vault != vault
+        || !constant_time_eq::constant_time_eq(
+            session.password.as_slice(),
+            previous_password.as_slice(),
+        )
+    {
+        return Err("The vault changed during the password update. Try again.".into());
+    }
+    let next_password = next.clone();
+    atomic_write_replace(&path, &encrypted, "vault")?;
+    session.password = next_password;
     Ok(())
 }
 #[tauri::command(rename = "export_vault")]
@@ -1893,15 +2062,24 @@ fn parse_encrypted_aegis(value: &Value, password: &str) -> Result<Vec<ImportCand
 }
 
 #[tauri::command(rename = "parse_import")]
-fn parse_import_command(request: ImportRequest) -> Result<Vec<ImportCandidate>, String> {
-    parse_import(
-        &request.format,
-        &request.content,
-        request.password.as_deref(),
-    )
+async fn parse_import_command(request: ImportRequest) -> Result<Vec<ImportCandidate>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        parse_import(
+            &request.format,
+            &request.content,
+            request.password.as_deref(),
+        )
+    })
+    .await
+    .map_err(|error| format!("Import parsing task failed: {error}"))?
 }
 #[tauri::command(rename = "parse_import_file")]
-fn parse_import_file(request: ImportFileRequest) -> Result<Vec<ImportCandidate>, String> {
+async fn parse_import_file(request: ImportFileRequest) -> Result<Vec<ImportCandidate>, String> {
+    tauri::async_runtime::spawn_blocking(move || parse_import_file_blocking(request))
+        .await
+        .map_err(|error| format!("Import parsing task failed: {error}"))?
+}
+fn parse_import_file_blocking(request: ImportFileRequest) -> Result<Vec<ImportCandidate>, String> {
     let path = Path::new(&request.path);
     let metadata =
         fs::metadata(path).map_err(|error| format!("Cannot read the selected export: {error}"))?;
@@ -1931,7 +2109,12 @@ fn parse_import_file(request: ImportFileRequest) -> Result<Vec<ImportCandidate>,
     parse_import(format, &content, request.password.as_deref())
 }
 #[tauri::command(rename = "import_qr_image")]
-fn import_qr_image(path: String) -> Result<ImportCandidate, String> {
+async fn import_qr_image(path: String) -> Result<ImportCandidate, String> {
+    tauri::async_runtime::spawn_blocking(move || import_qr_image_blocking(path))
+        .await
+        .map_err(|error| format!("QR image parsing task failed: {error}"))?
+}
+fn import_qr_image_blocking(path: String) -> Result<ImportCandidate, String> {
     let metadata =
         fs::metadata(&path).map_err(|error| format!("Cannot open the QR image: {error}"))?;
     if !metadata.is_file() || metadata.len() > 16 * 1024 * 1024 {
@@ -2307,6 +2490,8 @@ pub fn run() {
         resolve_vault_path,
         setup_vault,
         unlock_vault,
+        delete_vault,
+        add_totp_batch,
         lock_vault,
         get_vault_path,
         get_recovery_set,
@@ -2343,6 +2528,8 @@ pub fn run() {
         resolve_vault_path,
         setup_vault,
         unlock_vault,
+        delete_vault,
+        add_totp_batch,
         lock_vault,
         get_vault_path,
         get_recovery_set,
@@ -2427,10 +2614,12 @@ mod tests {
         assert_eq!(token.generate(1111111109), "07081804");
     }
     #[test]
-    fn countdown_obeys_period_boundary() {
-        let remaining = |now: u64, period: u64| period - now % period;
-        assert_eq!(remaining(29, 30), 1);
-        assert_eq!(remaining(30, 30), 30);
+    fn totp_clock_offset_keeps_code_and_countdown_in_sync() {
+        let local_time = 1_004;
+        let corrected_time = adjusted_totp_time(local_time);
+        assert_eq!(corrected_time, 1_000);
+        assert_eq!(totp_remaining_seconds(local_time, 30), 20);
+        assert_eq!(totp_remaining_seconds(1_024, 30), 30);
     }
     #[test]
     fn bitwarden_import_reads_standard_json() {

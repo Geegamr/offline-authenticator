@@ -16,10 +16,10 @@
         "title": "Offline Authenticator",
         "width": 390,
         "height": 760,
-        "minWidth": 350,
-        "minHeight": 560,
-        "resizable": true,
-        "maximizable": true,
+        "minWidth": 390,
+        "minHeight": 760,
+        "resizable": false,
+        "maximizable": false,
         "decorations": false,
         "center": true
       }
