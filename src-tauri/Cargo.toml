@@ -28,7 +28,6 @@ chacha20poly1305 = { version = "0.10", features = ["std"] }
 chrono = { version = "0.4", features = ["serde", "clock"] }
 aes-gcm = "0.10"
 scrypt = "0.11"
-xcap = "0.9.8"
 constant_time_eq = "0.3"
 getrandom = "0.2"
 hex = "0.4"

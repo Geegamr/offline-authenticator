@@ -169,6 +169,7 @@ export async function addRecoverySet(input: { name: string; subtitle: string; co
 }
 export async function updateRecoverySet(set: RecoverySet) { if (isTauri()) return invoke("update_recovery_set", { set }); demoRecoverySets[set.id] = structuredClone(set); const summary = requireDemo(); const item = summary.recovery_sets.find((entry) => entry.id === set.id); if (item) { item.available_count = set.codes.filter((code) => !code.used).length; item.used_count = set.codes.filter((code) => code.used).length; } }
 export async function setRecoveryCodeUsed(setId: string, codeId: string, used: boolean) { if (isTauri()) return invoke("set_recovery_code_used", { setId, codeId, used }); const set = await getRecoverySet(setId); const code = set.codes.find((entry) => entry.id === codeId); if (!code) throw new Error("Recovery code not found."); code.used = used; await updateRecoverySet(set); }
+export async function deleteRecoveryCode(setId: string, codeId: string) { if (isTauri()) return invoke("delete_recovery_code", { setId, codeId }); const set = await getRecoverySet(setId); const codes = set.codes.filter((code) => code.id !== codeId); if (codes.length === set.codes.length) throw new Error("Recovery code not found."); await updateRecoverySet({ ...set, codes }); }
 export async function deleteRecoverySet(setId: string) { if (isTauri()) return invoke("delete_recovery_set", { id: setId }); const summary = requireDemo(); summary.recovery_sets = summary.recovery_sets.filter((entry) => entry.id !== setId); for (const record of summary.totp_entries) if (record.recovery_set_id === setId) record.recovery_set_id = null; delete demoRecoverySets[setId]; }
 export async function reorderRecoverySets(ids: string[]) { if (isTauri()) return invoke("reorder_recovery_sets", { ids }); requireDemo().preferences.recovery_order = ids; }
 export async function updatePreferences(preferences: Preferences) { if (isTauri()) return invoke("update_preferences", { preferences }); requireDemo().preferences = preferences; }
@@ -218,8 +219,6 @@ export type RestoreConflict = { id: string; kind: "totp" | "recovery"; current_n
 export type RestoreChoice = { id: string; choice: "keep current" | "replace" | "keep both" | "skip" };
 export async function restoreVault(source: string, backupPassword: string): Promise<RestoreConflict[]> { if (isTauri()) return invoke("restore_vault", { source, backupPassword }); return []; }
 export async function applyRestoreConflicts(choices: RestoreChoice[]) { if (isTauri()) return invoke("apply_restore_conflicts", { choices }); }
-
-export async function screenScan(selection: { x: number; y: number; width: number; height: number }): Promise<ImportCandidate> { if (isTauri()) return invoke("capture_screen_region", { request: selection }); throw new Error("Screen scan requires the Windows desktop app."); }
 export async function importQrImage(path: string): Promise<ImportCandidate> { if (isTauri()) return invoke("import_qr_image", { path }); throw new Error("QR image import requires the Windows desktop app."); }
 export async function readClipboard(): Promise<string> { if (isTauri()) return Clipboard.readText(); return navigator.clipboard?.readText() ?? ""; }
 export function clearDemoVault() { demoSummary = null; for (const key of Object.keys(demoRecoverySets)) delete demoRecoverySets[key]; }

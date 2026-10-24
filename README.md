@@ -4,7 +4,7 @@ Offline Authenticator is a Windows desktop app for storing time-based sign-in co
 
 ## What it does
 
-- Creates TOTP codes from manual keys, authenticator links, QR images, a camera, or a screen scan.
+- Creates TOTP codes from manual keys, authenticator links, QR images, or a camera.
 - Imports TOTP entries from Aegis and Bitwarden exports, plus Google transfer QR codes.
 - Keeps recovery codes in separate named lists and tracks which ones have been used.
 - Encrypts the vault with a password before saving it. There is no password reset.

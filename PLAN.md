@@ -78,7 +78,7 @@ The product name is temporary until branding is chosen.
 - If the prompt is disabled, clicking copies without changing status.
 - Double-clicking a usable code copies it and marks it Used directly.
 - Holding a Used code asks for confirmation before resetting it to Usable.
-- Provide equivalent keyboard and context-menu actions.
+- Provide equivalent keyboard and context-menu actions, including confirmed individual-code deletion. Deleting the last code is handled by deleting the whole set.
 - Search by name and subtitle.
 - Persist chronological default order and manual reordering, as on the TOTP tab.
 
@@ -102,7 +102,6 @@ The single-entry **+** flow supports:
 - Pasting an `otpauth://` link.
 - Scanning a QR image file.
 - Webcam scanning.
-- The screen-frame scan described below.
 
 Settings handles bulk migration imports and encrypted vault backup/restore. The empty state offers both one-entry setup and bulk import.
 
@@ -124,15 +123,6 @@ Requirements:
 - Describe Google migration QR support as best-effort, not a stable-format guarantee.
 
 ## QR scanning modes
-
-### Screen scan
-
-- Open a small, movable, resizable transparent frame over the QR code.
-- Provide an accessible **Scan** control or shortcut.
-- Hide the overlay briefly, capture and crop the selected screen region, decode it, restore the frame, and show the parsed account for review.
-- Transparency alone cannot read the pixels covered by the overlay.
-- Support keyboard movement and resizing, Escape to cancel, visible focus, and result announcements.
-- Test DPI scaling and multiple monitors.
 
 ### Webcam scan
 
@@ -244,7 +234,7 @@ Conflict detection:
 - Plaintext warnings, best-effort Google behavior, review-before-save, and unsupported-format guidance are explicit.
 - Auto-lock works for both timers, system sleep, manual lock, and app exit.
 - The camera stays off until requested and stops after use.
-- Test screen capture and webcam scanning on actual Windows 10/11, including denied camera permission and multiple-DPI displays where available.
+- Test webcam scanning on actual Windows 10/11, including denied camera permission.
 - Build and test the Windows installer and portable ZIP.
 - Verify missing-WebView2 preflight and prompts, writable-vault-folder errors, and launch behavior on supported Windows versions.
 
@@ -263,6 +253,5 @@ Conflict detection:
 - Aegis vault format.
 - Bitwarden Authenticator import/export.
 - Google Authenticator transfer guidance.
-- Windows display-capture exclusion: the screen-frame approach should capture only after hiding the overlay because capture exclusion does not universally guarantee transparent read-through.
 
 The workspace was empty at planning time. On approval, build this as a new project at the workspace root and verify the implementation against the acceptance criteria above. No files were created or modified during the planning phase.

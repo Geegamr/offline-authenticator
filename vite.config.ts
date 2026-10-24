@@ -11,7 +11,6 @@ export default defineConfig(() => ({
     rolldownOptions: {
       input: {
         main: "index.html",
-        "screen-capture": "screen-capture.html",
       },
     },
   },

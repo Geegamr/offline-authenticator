@@ -22,9 +22,6 @@ use tauri::{Emitter, Manager, State};
 use totp_rs::{Algorithm as OtpAlgorithm, Secret, TOTP};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-#[cfg(windows)]
-mod screen_capture;
-
 const FORMAT_MAGIC: &[u8; 8] = b"OAUTHV01";
 const FORMAT_VERSION: u32 = 1;
 const DEFAULT_MEMORY_KIB: u32 = 65_536;
@@ -1380,6 +1377,30 @@ async fn set_recovery_code_used(
     session.vault = vault;
     Ok(())
 }
+fn remove_recovery_code(vault: &mut VaultData, set_id: &str, code_id: &str) -> Result<(), String> {
+    let set = vault
+        .recovery_sets
+        .iter_mut()
+        .find(|item| item.id == set_id)
+        .ok_or("Backup-code set not found")?;
+    let index = set
+        .codes
+        .iter()
+        .position(|item| item.id == code_id)
+        .ok_or("Recovery code not found")?;
+    set.codes.remove(index);
+    Ok(())
+}
+#[tauri::command(rename = "delete_recovery_code")]
+fn delete_recovery_code(
+    set_id: String,
+    code_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    update_vault(&state, |vault| {
+        remove_recovery_code(vault, &set_id, &code_id)
+    })
+}
 #[tauri::command(rename = "delete_recovery_set")]
 fn delete_recovery_set(id: String, state: State<'_, AppState>) -> Result<(), String> {
     update_vault(&state, |vault| {
@@ -2460,21 +2481,6 @@ fn apply_restore_conflicts(
     Ok(())
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct MonitorBounds {
-    pub x: i32,
-    pub y: i32,
-    pub width: u32,
-    pub height: u32,
-    pub scale_factor: f32,
-}
-#[cfg(windows)]
-use screen_capture::{
-    begin_screen_capture, cancel_screen_capture, capture_screen_region, get_primary_monitor_bounds,
-};
-#[cfg(windows)]
-use xcap::Monitor;
-
 pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -2500,14 +2506,6 @@ pub fn run() {
                 tauri::WindowEvent::Focused(false) => {
                     if let Ok(mut lost_at) = window.state::<AppState>().focus_lost_at.lock() {
                         *lost_at = Some(std::time::Instant::now());
-                    }
-                    #[cfg(windows)]
-                    if window
-                        .app_handle()
-                        .get_webview_window("screen-capture")
-                        .is_some()
-                    {
-                        return;
                     }
                     let _ = window.emit("app-focus-lost", ());
                 }
@@ -2543,6 +2541,7 @@ pub fn run() {
         add_recovery_set,
         update_recovery_set,
         set_recovery_code_used,
+        delete_recovery_code,
         delete_recovery_set,
         reorder_recovery_sets,
         update_preferences,
@@ -2552,11 +2551,7 @@ pub fn run() {
         apply_restore_conflicts,
         parse_import_command,
         parse_import_file,
-        import_qr_image,
-        begin_screen_capture,
-        cancel_screen_capture,
-        capture_screen_region,
-        get_primary_monitor_bounds
+        import_qr_image
     ]);
     #[cfg(not(windows))]
     let builder = builder.invoke_handler(tauri::generate_handler![
@@ -2581,6 +2576,7 @@ pub fn run() {
         add_recovery_set,
         update_recovery_set,
         set_recovery_code_used,
+        delete_recovery_code,
         delete_recovery_set,
         reorder_recovery_sets,
         update_preferences,
@@ -2730,6 +2726,13 @@ mod tests {
         assert!(!codes[1].used);
         assert_eq!(codes[0].value, "alpha");
         assert!(update_recovery_code_used(&mut vault, "missing", "code-1", false).is_err());
+        remove_recovery_code(&mut vault, "set-1", "code-1").unwrap();
+        assert_eq!(vault.recovery_sets[0].codes.len(), 1);
+        assert_eq!(vault.recovery_sets[0].codes[0].id, "code-2");
+        remove_recovery_code(&mut vault, "set-1", "code-2").unwrap();
+        assert!(vault.recovery_sets[0].codes.is_empty());
+        assert!(remove_recovery_code(&mut vault, "set-1", "code-2").is_err());
+        assert!(remove_recovery_code(&mut vault, "missing", "code-2").is_err());
     }
     #[test]
     fn recovery_conflict_comparison_is_exact_for_code_values() {
