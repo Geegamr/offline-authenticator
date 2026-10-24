@@ -1320,27 +1320,65 @@ fn update_recovery_set(set: RecoverySet, state: State<'_, AppState>) -> Result<(
         Ok(())
     })
 }
+fn update_recovery_code_used(
+    vault: &mut VaultData,
+    set_id: &str,
+    code_id: &str,
+    used: bool,
+) -> Result<(), String> {
+    let set = vault
+        .recovery_sets
+        .iter_mut()
+        .find(|item| item.id == set_id)
+        .ok_or("Backup-code set not found")?;
+    let code = set
+        .codes
+        .iter_mut()
+        .find(|item| item.id == code_id)
+        .ok_or("Recovery code not found")?;
+    code.used = used;
+    Ok(())
+}
 #[tauri::command(rename = "set_recovery_code_used")]
-fn set_recovery_code_used(
+async fn set_recovery_code_used(
     set_id: String,
     code_id: String,
     used: bool,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    update_vault(&state, |vault| {
-        let set = vault
-            .recovery_sets
-            .iter_mut()
-            .find(|item| item.id == set_id)
-            .ok_or("Backup-code set not found")?;
-        let code = set
-            .codes
-            .iter_mut()
-            .find(|item| item.id == code_id)
-            .ok_or("Recovery code not found")?;
-        code.used = used;
-        Ok(())
+    let (path, password, original_vault, mut vault) = {
+        let guard = get_session(&state)?;
+        let session = guard.as_ref().ok_or("The vault is locked")?;
+        (
+            session.path.clone(),
+            session.password.clone(),
+            session.vault.clone(),
+            session.vault.clone(),
+        )
+    };
+    update_recovery_code_used(&mut vault, &set_id, &code_id, used)?;
+
+    let encryption_password = password.clone();
+    let (bytes, vault) = tauri::async_runtime::spawn_blocking(move || {
+        let bytes = encrypt_vault(&vault, encryption_password.as_slice())?;
+        Ok::<_, String>((bytes, vault))
     })
+    .await
+    .map_err(|error| format!("Recovery-code update task failed: {error}"))??;
+
+    let mut guard = get_session(&state)?;
+    let session = guard
+        .as_mut()
+        .ok_or("The vault was locked during the update")?;
+    if session.path != path
+        || session.vault != original_vault
+        || !constant_time_eq::constant_time_eq(session.password.as_slice(), password.as_slice())
+    {
+        return Err("The vault changed during the recovery-code update. Try again.".into());
+    }
+    atomic_write_replace(&path, &bytes, "vault")?;
+    session.vault = vault;
+    Ok(())
 }
 #[tauri::command(rename = "delete_recovery_set")]
 fn delete_recovery_set(id: String, state: State<'_, AppState>) -> Result<(), String> {
@@ -2662,6 +2700,36 @@ mod tests {
         b.name = "github".into();
         assert!(totp_conflict(&a, &b));
         assert!(!same_label("A", "one", "A", "two"));
+    }
+    #[test]
+    fn used_state_update_changes_only_the_selected_code() {
+        let mut vault = initialized_vault();
+        vault.recovery_sets.push(RecoverySet {
+            id: "set-1".into(),
+            name: "Example".into(),
+            subtitle: String::new(),
+            added_at: 0,
+            codes: vec![
+                RecoveryCode {
+                    id: "code-1".into(),
+                    value: "alpha".into(),
+                    used: false,
+                    added_at: 0,
+                },
+                RecoveryCode {
+                    id: "code-2".into(),
+                    value: "beta".into(),
+                    used: false,
+                    added_at: 0,
+                },
+            ],
+        });
+        update_recovery_code_used(&mut vault, "set-1", "code-1", true).unwrap();
+        let codes = &vault.recovery_sets[0].codes;
+        assert!(codes[0].used);
+        assert!(!codes[1].used);
+        assert_eq!(codes[0].value, "alpha");
+        assert!(update_recovery_code_used(&mut vault, "missing", "code-1", false).is_err());
     }
     #[test]
     fn recovery_conflict_comparison_is_exact_for_code_values() {

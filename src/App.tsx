@@ -356,8 +356,33 @@ export default function App() {
   }
 
   async function toggleRecoveryCode(set: RecoverySet, codeId: string, used: boolean) {
-    try { await setRecoveryCodeUsed(set.id, codeId, used); setActiveSet(await getRecoverySet(set.id)); refresh(); }
-    catch (error) { fail(error); }
+    const code = set.codes.find((item) => item.id === codeId);
+    if (!code || code.used === used) return;
+    const updatedSet = { ...set, codes: set.codes.map((item) => item.id === codeId ? { ...item, used } : item) };
+    const updatedSummary = (current: VaultSummary | null) => current && ({
+      ...current,
+      recovery_sets: current.recovery_sets.map((item) => item.id === set.id ? {
+        ...item,
+        available_count: updatedSet.codes.filter((entry) => !entry.used).length,
+        used_count: updatedSet.codes.filter((entry) => entry.used).length,
+      } : item),
+    });
+    setActiveSet((current) => current?.id === set.id ? updatedSet : current);
+    setSummary(updatedSummary);
+    try {
+      await setRecoveryCodeUsed(set.id, codeId, used);
+    } catch (error) {
+      setActiveSet((current) => current?.id === set.id ? set : current);
+      setSummary((current) => current && ({
+        ...current,
+        recovery_sets: current.recovery_sets.map((item) => item.id === set.id ? {
+          ...item,
+          available_count: set.codes.filter((entry) => !entry.used).length,
+          used_count: set.codes.filter((entry) => entry.used).length,
+        } : item),
+      }));
+      fail(error);
+    }
   }
 
   function askToReset(set: RecoverySet, codeId: string) {
@@ -413,7 +438,7 @@ export default function App() {
 
     <nav className="bottom-nav" aria-label="Main tabs">{NAVIGATION.map((item)=><button key={item.key} className={`nav-item ${tab===item.key?"is-active":""}`} aria-current={tab===item.key?"page":undefined} onClick={()=>{setActiveSet(null);setTab(item.key);setSearch("");}}><Icon name={item.icon} size={20}/><span>{item.label}</span></button>)}</nav>
     {addDialog && <Modal title={editTarget?"Edit authenticator":importMode === "bulk" ? "Review your accounts" : "Add a 2FA code"} subtitle={importMode === "bulk" ? `${pendingImport.length} accounts found. Check each label before saving.` : "The code key stays in your encrypted vault."} onClose={()=>{setAddDialog(false);setImportMode(null);setPendingImport([]);setEditTarget(null);}}><AddTotpForm initial={editTarget ? [{...editTarget, secret: ""}] : pendingImport} mode={importMode} working={working} onMode={(mode)=>setImportMode(mode)} onImportFile={()=>void importFile()} onChooseImage={()=>void startAdd("image")} onScreenScan={()=>void startAdd("screen")} onPasteLink={(value)=>void importUri(value)} onReview={(records)=>{if(editTarget){void handleUpdateTotp(records[0]!);}else{void submitReview(records);}}} onRemove={(index)=>setPendingImport((items)=>items.filter((_,itemIndex)=>itemIndex!==index))} onStopCamera={stopCamera} screenScanSupported={screenScanSupported}/></Modal>}
-    {showRecoveryDialog && <Modal title={selectedRecoveryToEdit ? "Edit backup codes" : "Add backup codes"} subtitle="Paste a full list or enter each code on its own line." onClose={()=>{setShowRecoveryDialog(false);setSelectedRecoveryToEdit(null);}}><RecoverySetForm initial={selectedRecoveryToEdit} working={working} onSave={async(input)=>{setWorking(true);try{if(selectedRecoveryToEdit){const updated={...selectedRecoveryToEdit,name:input.name,subtitle:input.subtitle,codes:input.codes.map((value,index)=>selectedRecoveryToEdit.codes[index]??{id:crypto.randomUUID(),value,used:false,added_at:Date.now()/1000})};await updateRecoverySet(updated);}else{await addRecoverySet(input);}setShowRecoveryDialog(false);setSelectedRecoveryToEdit(null);refresh();notify("Backup codes saved");}catch(error){fail(error);}finally{setWorking(false);}}} /></Modal>}
+    {showRecoveryDialog && <Modal title={selectedRecoveryToEdit ? "Edit backup codes" : "Add backup codes"} subtitle="Paste a full list or enter each code on its own line." onClose={()=>{setShowRecoveryDialog(false);setSelectedRecoveryToEdit(null);}}><RecoverySetForm initial={selectedRecoveryToEdit} working={working} onSave={async(input)=>{setWorking(true);try{if(selectedRecoveryToEdit){const updated={...selectedRecoveryToEdit,name:input.name,subtitle:input.subtitle,codes:input.codes.map((value,index)=>selectedRecoveryToEdit.codes[index]??{id:crypto.randomUUID(),value,used:false,added_at:Date.now()/1000})};await updateRecoverySet(updated);}else{await addRecoverySet(input);}setSummary(await getVaultSummary());setShowRecoveryDialog(false);setSelectedRecoveryToEdit(null);refresh();notify("Backup codes saved");}catch(error){fail(error);}finally{setWorking(false);}}} /></Modal>}
     {clipboardPrompt && <Dialog title="Did you use this code?" message="The code was copied. Mark it as used if you signed in with it." confirm="Yes, mark used" cancel="No, keep usable" onConfirm={()=>{void toggleRecoveryCode(activeSet!,clipboardPrompt.codeId,true);setClipboardPrompt(null);}} onCancel={()=>setClipboardPrompt(null)}/>}
     {dialog && <Dialog title={dialog.title} message={dialog.message} confirm={dialog.confirm} cancel={dialog.cancel} destructive={dialog.destructive} onConfirm={dialog.onConfirm??(()=>setDialog(null))} onCancel={()=>setDialog(null)}/>}
     {restoreConflicts.length > 0 && <Modal title="Review backup conflicts" subtitle="Choose what to do with each matching record. Other records will be added after you confirm." onClose={() => { setRestoreConflicts([]); setRestoreChoices({}); }}><div className="restore-conflict-list">{restoreConflicts.map((conflict) => <article className="restore-conflict" key={conflict.id}><h3>{conflict.kind === "totp" ? "Authenticator" : "Backup-code set"}</h3><div className="conflict-comparison"><div><strong>Current: {conflict.current_name}</strong><small>{conflict.current_subtitle} · {conflict.current_detail}</small></div><div><strong>Backup: {conflict.imported_name}</strong><small>{conflict.imported_subtitle} · {conflict.imported_detail}</small></div></div><label className="field-label" htmlFor={`restore-choice-${conflict.id}`}>Action</label><select id={`restore-choice-${conflict.id}`} value={restoreChoices[conflict.id] ?? ""} onChange={(event) => setRestoreChoices((items) => ({ ...items, [conflict.id]: event.target.value as RestoreChoice["choice"] }))}><option value="">Choose an action</option><option value="keep current">Keep current</option><option value="replace">Replace with backup</option><option value="keep both">Keep both</option><option value="skip">Skip this entry</option></select></article>)}</div><div className="modal-form-actions"><button className="primary-button" disabled={restoreConflicts.some((item) => !restoreChoices[item.id])} onClick={async () => { try { await applyRestoreConflicts(restoreConflicts.map((item) => ({ id: item.id, choice: restoreChoices[item.id]! }))); setRestoreConflicts([]); setRestoreChoices({}); refresh(); notify("Backup restored"); } catch (error) { fail(error); } }}>Apply choices</button></div></Modal>}
