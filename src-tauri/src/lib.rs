@@ -295,9 +295,30 @@ struct RestoreChoice {
     id: String,
     choice: String,
 }
+#[derive(Clone, Copy, Debug)]
+struct KdfParams {
+    memory_kib: u32,
+    iterations: u32,
+    lanes: u32,
+}
+impl KdfParams {
+    fn defaults() -> Self {
+        Self {
+            memory_kib: DEFAULT_MEMORY_KIB,
+            iterations: DEFAULT_ITERATIONS,
+            lanes: DEFAULT_LANES,
+        }
+    }
+}
+struct VaultKey {
+    salt: Zeroizing<[u8; 16]>,
+    key: Zeroizing<[u8; 32]>,
+    params: KdfParams,
+}
 struct Session {
     path: PathBuf,
     password: Zeroizing<Vec<u8>>,
+    keys: VaultKey,
     vault: VaultData,
 }
 impl Drop for Session {
@@ -401,20 +422,15 @@ fn derive_key(
         .map_err(|_| "Could not derive a vault key".to_string())?;
     Ok(output)
 }
-fn encrypt_vault(data: &VaultData, password: &[u8]) -> Result<Vec<u8>, String> {
-    let mut salt = [0u8; 16];
+fn encrypt_vault_with_key(
+    data: &VaultData,
+    key: &Zeroizing<[u8; 32]>,
+    salt: &[u8; 16],
+    params: KdfParams,
+) -> Result<Vec<u8>, String> {
     let mut nonce = [0u8; 24];
-    getrandom::getrandom(&mut salt)
-        .map_err(|error| format!("Could not create a vault salt: {error}"))?;
     getrandom::getrandom(&mut nonce)
         .map_err(|error| format!("Could not create a vault nonce: {error}"))?;
-    let key = derive_key(
-        password,
-        &salt,
-        DEFAULT_MEMORY_KIB,
-        DEFAULT_ITERATIONS,
-        DEFAULT_LANES,
-    )?;
     let cipher = XChaCha20Poly1305::new_from_slice(key.as_ref())
         .map_err(|_| "Could not initialize vault encryption".to_string())?;
     let plaintext = Zeroizing::new(
@@ -434,9 +450,9 @@ fn encrypt_vault(data: &VaultData, password: &[u8]) -> Result<Vec<u8>, String> {
     );
     let header = VaultHeader {
         version: FORMAT_VERSION,
-        memory_kib: DEFAULT_MEMORY_KIB,
-        iterations: DEFAULT_ITERATIONS,
-        lanes: DEFAULT_LANES,
+        memory_kib: params.memory_kib,
+        iterations: params.iterations,
+        lanes: params.lanes,
         salt: BASE64.encode(salt),
         nonce: BASE64.encode(nonce),
         ciphertext: BASE64.encode(encrypted.as_slice()),
@@ -447,11 +463,28 @@ fn encrypt_vault(data: &VaultData, password: &[u8]) -> Result<Vec<u8>, String> {
     out.extend_from_slice(FORMAT_MAGIC);
     out.extend_from_slice(&FORMAT_VERSION.to_be_bytes());
     out.extend_from_slice(&body);
-    salt.zeroize();
     nonce.zeroize();
     Ok(out)
 }
-fn decrypt_vault(bytes: &[u8], password: &[u8]) -> Result<VaultData, String> {
+fn encrypt_vault_new(data: &VaultData, password: &[u8]) -> Result<(Vec<u8>, VaultKey), String> {
+    let mut salt = Zeroizing::new([0u8; 16]);
+    getrandom::getrandom(salt.as_mut())
+        .map_err(|error| format!("Could not create a vault salt: {error}"))?;
+    let params = KdfParams::defaults();
+    let key = derive_key(
+        password,
+        &salt[..],
+        params.memory_kib,
+        params.iterations,
+        params.lanes,
+    )?;
+    let bytes = encrypt_vault_with_key(data, &key, &salt, params)?;
+    Ok((bytes, VaultKey { salt, key, params }))
+}
+fn encrypt_vault(data: &VaultData, password: &[u8]) -> Result<Vec<u8>, String> {
+    encrypt_vault_new(data, password).map(|(bytes, _)| bytes)
+}
+fn decrypt_vault_with_key(bytes: &[u8], password: &[u8]) -> Result<(VaultData, VaultKey), String> {
     if bytes.len() < 12 || bytes.len() as u64 > MAX_VAULT_BYTES {
         return Err("The vault file is empty, too large, or incomplete.".into());
     }
@@ -492,12 +525,21 @@ fn decrypt_vault(bytes: &[u8], password: &[u8]) -> Result<VaultData, String> {
     if ciphertext.len() > MAX_VAULT_BYTES as usize {
         return Err("The encrypted vault data is too large.".into());
     }
+    let salt_bytes: [u8; 16] = salt
+        .as_slice()
+        .try_into()
+        .map_err(|_| "The encrypted vault salt is invalid".to_string())?;
+    let params = KdfParams {
+        memory_kib: header.memory_kib,
+        iterations: header.iterations,
+        lanes: header.lanes,
+    };
     let key = derive_key(
         password,
         &salt,
-        header.memory_kib,
-        header.iterations,
-        header.lanes,
+        params.memory_kib,
+        params.iterations,
+        params.lanes,
     )?;
     let cipher = XChaCha20Poly1305::new_from_slice(key.as_ref())
         .map_err(|_| "Could not initialize vault encryption".to_string())?;
@@ -518,7 +560,17 @@ fn decrypt_vault(bytes: &[u8], password: &[u8]) -> Result<VaultData, String> {
     let data: VaultData = serde_json::from_slice(&plaintext)
         .map_err(|_| "The decrypted vault data is not valid.".to_string())?;
     validate_vault(&data)?;
-    Ok(data)
+    Ok((
+        data,
+        VaultKey {
+            salt: Zeroizing::new(salt_bytes),
+            key,
+            params,
+        },
+    ))
+}
+fn decrypt_vault(bytes: &[u8], password: &[u8]) -> Result<VaultData, String> {
+    decrypt_vault_with_key(bytes, password).map(|(vault, _)| vault)
 }
 fn validate_vault(vault: &VaultData) -> Result<(), String> {
     if vault.version > 1 {
@@ -681,10 +733,6 @@ fn atomic_write_replace(path: &Path, bytes: &[u8], label: &str) -> Result<(), St
     }
     Ok(())
 }
-fn atomic_save(path: &Path, data: &VaultData, password: &[u8]) -> Result<(), String> {
-    let bytes = encrypt_vault(data, password)?;
-    atomic_write_replace(path, &bytes, "vault")
-}
 fn initialized_vault() -> VaultData {
     VaultData {
         version: FORMAT_VERSION,
@@ -740,12 +788,18 @@ fn touch_vault_activity(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 fn save_session(session: &Session) -> Result<(), String> {
-    atomic_save(&session.path, &session.vault, session.password.as_slice())
+    let bytes = encrypt_vault_with_key(
+        &session.vault,
+        &session.keys.key,
+        &session.keys.salt,
+        session.keys.params,
+    )?;
+    atomic_write_replace(&session.path, &bytes, "vault")
 }
 fn unlock_path(
     path: PathBuf,
     password: String,
-) -> Result<(PathBuf, VaultData, Zeroizing<Vec<u8>>), String> {
+) -> Result<(PathBuf, VaultData, Zeroizing<Vec<u8>>, VaultKey), String> {
     let mut password_bytes = Zeroizing::new(password.into_bytes());
     let metadata =
         fs::metadata(&path).map_err(|error| format!("Cannot open the selected vault: {error}"))?;
@@ -758,8 +812,8 @@ fn unlock_path(
     file.take(MAX_VAULT_BYTES + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| format!("Cannot read the selected vault: {error}"))?;
-    let vault = decrypt_vault(&bytes, &password_bytes)?;
-    Ok((path, vault, std::mem::take(&mut password_bytes)))
+    let (vault, keys) = decrypt_vault_with_key(&bytes, &password_bytes)?;
+    Ok((path, vault, std::mem::take(&mut password_bytes), keys))
 }
 
 #[tauri::command(rename = "vault_exists")]
@@ -933,7 +987,7 @@ async fn unlock_vault(
     password: String,
     state: State<'_, AppState>,
 ) -> Result<VaultSummary, String> {
-    let (path, vault, password) =
+    let (path, vault, password, keys) =
         tauri::async_runtime::spawn_blocking(move || unlock_path(PathBuf::from(path), password))
             .await
             .map_err(|error| format!("Vault unlock task failed: {error}"))??;
@@ -943,6 +997,7 @@ async fn unlock_vault(
         .map_err(|_| "Vault state is unavailable".to_string())? = Some(Session {
         path,
         password,
+        keys,
         vault: vault.clone(),
     });
     *state
@@ -1490,8 +1545,8 @@ async fn change_master_password(
     };
     let encryption_password = next.clone();
     let encryption_vault = vault.clone();
-    let encrypted = tauri::async_runtime::spawn_blocking(move || {
-        encrypt_vault(&encryption_vault, encryption_password.as_slice())
+    let (encrypted, keys) = tauri::async_runtime::spawn_blocking(move || {
+        encrypt_vault_new(&encryption_vault, encryption_password.as_slice())
     })
     .await
     .map_err(|error| format!("Password change task failed: {error}"))??;
@@ -1511,6 +1566,7 @@ async fn change_master_password(
     let next_password = next.clone();
     atomic_write_replace(&path, &encrypted, "vault")?;
     session.password = next_password;
+    session.keys = keys;
     Ok(())
 }
 #[tauri::command(rename = "export_vault")]
@@ -2410,7 +2466,7 @@ fn restore_vault(
     backup_password: String,
     state: State<'_, AppState>,
 ) -> Result<Vec<RestoreConflictView>, String> {
-    let (_path, imported, _password) = unlock_path(PathBuf::from(source), backup_password)?;
+    let (_path, imported, _password, _keys) = unlock_path(PathBuf::from(source), backup_password)?;
     let mut guard = get_session(&state)?;
     let session = guard.as_mut().ok_or("The vault is locked")?;
     let (views, conflicts) = inspect_restore_conflicts(&session.vault, &imported)?;
@@ -2618,6 +2674,24 @@ mod tests {
         let last = bytes.len() - 2;
         bytes[last] ^= 1;
         assert!(decrypt_vault(&bytes, b"longenoughpass").is_err());
+    }
+    #[test]
+    fn cached_key_saves_stay_readable_with_the_password() {
+        let password = b"longenoughpass";
+        let (_bytes, keys) = encrypt_vault_new(&initialized_vault(), password).unwrap();
+        let mut saved =
+            encrypt_vault_with_key(&initialized_vault(), &keys.key, &keys.salt, keys.params)
+                .unwrap();
+        for _ in 0..3 {
+            saved =
+                encrypt_vault_with_key(&initialized_vault(), &keys.key, &keys.salt, keys.params)
+                    .unwrap();
+        }
+        let (vault, loaded) = decrypt_vault_with_key(&saved, password).unwrap();
+        assert_eq!(vault, initialized_vault());
+        assert_eq!(loaded.salt.as_ref(), keys.salt.as_ref());
+        assert_eq!(loaded.key.as_ref(), keys.key.as_ref());
+        assert_eq!(loaded.params.memory_kib, DEFAULT_MEMORY_KIB);
     }
     #[test]
     fn kdf_rejects_unsafe_cost() {
