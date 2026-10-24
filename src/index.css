@@ -22,6 +22,10 @@
   --red-light: #f9eaea;
   --radius: 10px;
   --shadow: 0 16px 48px rgb(23 35 49 / 9%);
+  --switch-off: #e7ebf0;
+  --switch-on: #4b6788;
+  --switch-knob: #ffffff;
+  --switch-edge: #dbe1e8;
 }
 :root[data-appearance="dark"] {
   color-scheme: dark;
@@ -39,6 +43,10 @@
   --red: #ee9393;
   --red-light: #442526;
   --shadow: 0 18px 50px rgb(0 0 0 / 32%);
+  --switch-off: #28343f;
+  --switch-on: #6b87ab;
+  --switch-knob: #f4f8fc;
+  --switch-edge: #37475a;
 }
 :root:not([data-appearance]), :root[data-appearance="system"] { color-scheme: light dark; }
 @media (prefers-color-scheme: dark) {
@@ -49,6 +57,7 @@
     --line: #2a3948; --blue: #91a9c9; --blue-dark: #afc1da; --green: #78c39d;
     --green-light: #193b2d; --red: #ee9393; --red-light: #442526;
     --shadow: 0 18px 50px rgb(0 0 0 / 32%);
+    --switch-off: #28343f; --switch-on: #6b87ab; --switch-knob: #f4f8fc; --switch-edge: #37475a;
   }
 }
 * { box-sizing: border-box; }
