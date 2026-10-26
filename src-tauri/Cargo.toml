@@ -1,6 +1,6 @@
 [package]
 name = "offline-authenticator"
-version = "0.1.1"
+version = "0.1.2"
 description = "A local Windows authenticator for one-time passwords and recovery codes."
 authors = ["Geegamr"]
 edition = "2024"
